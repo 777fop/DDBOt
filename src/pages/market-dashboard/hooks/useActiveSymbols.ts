@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api_base } from '@/external/bot-skeleton';
+import { useEffect, useRef, useState } from 'react';
+import { derivClient } from '../deriv-client';
 
 export type ActiveSymbol = {
     symbol: string;
@@ -7,104 +7,68 @@ export type ActiveSymbol = {
     market: string;
     submarket: string;
     submarket_display_name: string;
+    symbol_type?: string;
     pip: number;
     exchange_is_open: number;
 };
 
-const SYNTHETIC_MARKETS = new Set(['synthetic_index']);
+const EXCLUDED_SUBMARTKETS = new Set(['forex_basket', 'baskets', 'commodities_basket']);
 
-function isSyntheticIndex(sym: ActiveSymbol): boolean {
-    return SYNTHETIC_MARKETS.has(sym.market);
+function filterSymbols(raw: ActiveSymbol[]): ActiveSymbol[] {
+    const allSynthetic = raw.filter(
+        s => s.market === 'synthetic_index' && !EXCLUDED_SUBMARTKETS.has(s.submarket)
+    );
+    const openSynthetic = allSynthetic.filter(s => s.exchange_is_open === 1);
+    if (openSynthetic.length > 0) return openSynthetic;
+    if (allSynthetic.length > 0) return allSynthetic;
+    return raw.filter(s => s.market === 'synthetic_index');
 }
 
-function filterAndSort(rawList: ActiveSymbol[]): ActiveSymbol[] {
-    const synthetic = rawList.filter(isSyntheticIndex);
-    return synthetic.length > 0 ? synthetic : rawList;
-}
+async function fetchSymbols(): Promise<ActiveSymbol[]> {
+    try {
+        const resp = await derivClient.send<{ active_symbols?: ActiveSymbol[]; error?: unknown }>({
+            active_symbols: 'brief',
+        });
 
-async function ensureWsReady(): Promise<void> {
-    const ab = api_base as any;
-    const api = ab?.api;
-    const wsReady = api && api.connection?.readyState === 1;
-    if (!wsReady) {
-        try {
-            await ab.init();
-        } catch {}
-        const apiAfter = ab?.api;
-        if (!apiAfter || apiAfter.connection?.readyState !== 1) {
-            await new Promise<void>(resolve => {
-                const poll = setInterval(() => {
-                    const a = (api_base as any)?.api;
-                    if (a && a.connection?.readyState === 1) {
-                        clearInterval(poll);
-                        resolve();
-                    }
-                }, 300);
-                setTimeout(() => { clearInterval(poll); resolve(); }, 20000);
-            });
+        const rawList = Array.isArray(resp?.active_symbols) ? resp.active_symbols! : [];
+        if (rawList.length > 0) {
+            return filterSymbols(rawList);
         }
-    }
-}
-
-async function loadSymbols(): Promise<ActiveSymbol[]> {
-    const ab = api_base as any;
-
-    await ensureWsReady();
-
-    const fromApiBase = (): ActiveSymbol[] | null => {
-        const syms = ab?.active_symbols;
-        return Array.isArray(syms) && syms.length > 0 ? (syms as ActiveSymbol[]) : null;
-    };
-
-    const tryLandingCompanies = ['svg', 'maltainvest', null];
-
-    for (const lc of tryLandingCompanies) {
-        try {
-            const req: Record<string, unknown> = { active_symbols: 'brief' };
-            if (lc) req.landing_company_short = lc;
-            const resp = await ab.api.send(req);
-            const rawList: ActiveSymbol[] = Array.isArray(resp?.active_symbols) ? resp.active_symbols : [];
-            if (rawList.length > 0) {
-                return filterAndSort(rawList);
-            }
-        } catch {}
-    }
-
-    const fromBase = fromApiBase();
-    if (fromBase) return filterAndSort(fromBase);
-
+    } catch {}
     return [];
 }
 
-let cachedSymbols: ActiveSymbol[] | null = null;
-let globalFetch: Promise<ActiveSymbol[]> | null = null;
+let fetchPromise: Promise<ActiveSymbol[]> | null = null;
+let cachedResult: ActiveSymbol[] | null = null;
 
 export function useActiveSymbols() {
-    const [symbols, setSymbols] = useState<ActiveSymbol[]>(cachedSymbols ?? []);
-    const [loading, setLoading] = useState(cachedSymbols === null || cachedSymbols.length === 0);
+    const [symbols, setSymbols] = useState<ActiveSymbol[]>(cachedResult ?? []);
+    const [loading, setLoading] = useState(!cachedResult || cachedResult.length === 0);
+    const mountedRef = useRef(true);
 
     useEffect(() => {
-        if (cachedSymbols && cachedSymbols.length > 0) {
-            setSymbols(cachedSymbols);
+        mountedRef.current = true;
+
+        if (cachedResult && cachedResult.length > 0) {
+            setSymbols(cachedResult);
             setLoading(false);
             return;
         }
 
-        if (!globalFetch) {
-            globalFetch = loadSymbols();
+        if (!fetchPromise) {
+            fetchPromise = fetchSymbols();
         }
 
-        let mounted = true;
-        globalFetch.then(syms => {
-            if (!mounted) return;
-            cachedSymbols = syms;
-            globalFetch = null;
+        fetchPromise.then(syms => {
+            if (!mountedRef.current) return;
+            cachedResult = syms.length > 0 ? syms : null;
+            fetchPromise = null;
             setSymbols(syms);
             setLoading(false);
         });
 
         return () => {
-            mounted = false;
+            mountedRef.current = false;
         };
     }, []);
 

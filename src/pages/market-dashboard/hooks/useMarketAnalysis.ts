@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { wsManager } from '../ws-manager';
+import { derivClient } from '../deriv-client';
 import { ActiveSymbol } from './useActiveSymbols';
 
 const DIGIT_HISTORY_SIZE = 100;
@@ -78,16 +78,19 @@ export function useMarketAnalysis(symbols: ActiveSymbol[]) {
                 dataRef.current.set(sym.symbol, makeInitialRow(sym));
             }
         });
-
         setMarketData(new Map(dataRef.current));
 
-        const unsubscribeMsg = wsManager.onMessage((msg: any) => {
+        console.log('[MarketAnalysis] Registering message handler, sending subscriptions for', symbols.length, 'symbols');
+        const unsubMsg = derivClient.onMessage((msg: any) => {
+            if (msg.msg_type === 'tick') {
+                console.log('[MarketAnalysis] TICK received:', msg.tick?.symbol, msg.tick?.quote);
+            }
             if (msg.msg_type === 'tick' && msg.tick) {
-                const { symbol, quote, id } = msg.tick;
+                const { symbol, quote } = msg.tick;
                 const current = dataRef.current.get(symbol);
                 if (!current) return;
 
-                if (id) subscriptionIdsRef.current.set(symbol, id);
+                if (msg.subscription?.id) subscriptionIdsRef.current.set(symbol, msg.subscription.id);
 
                 const price = typeof quote === 'number' ? quote : parseFloat(quote);
                 const digit = getLastDigit(price);
@@ -114,14 +117,14 @@ export function useMarketAnalysis(symbols: ActiveSymbol[]) {
         });
 
         symbols.forEach(sym => {
-            wsManager.send({ ticks: sym.symbol, subscribe: 1 });
+            derivClient.sendAndForget({ ticks: sym.symbol, subscribe: 1 });
         });
 
         return () => {
-            unsubscribeMsg();
+            unsubMsg();
             if (batchTimerRef.current) clearTimeout(batchTimerRef.current);
             subscriptionIdsRef.current.forEach(id => {
-                wsManager.send({ forget: id });
+                derivClient.sendAndForget({ forget: id });
             });
             subscriptionIdsRef.current.clear();
         };
